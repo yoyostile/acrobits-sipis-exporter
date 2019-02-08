@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/robfig/cron"
+	"github.com/jamiealquiza/envy"
 )
 
 var addr = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
@@ -143,6 +144,7 @@ func collectSample() {
 }
 
 func main() {
+	envy.Parse("SIPIS")
 	flag.Parse()
 	http.Handle("/metrics", prometheus.Handler())
 
