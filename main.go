@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/robfig/cron"
-	"github.com/jamiealquiza/envy"
 )
 
 var addr = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
-var instance = flag.String("instance", "https://sipis.example.com", "Instance")
+var instances multiStringFlag
 var every = flag.String("every", "15m", "Update time")
 var myClient = &http.Client{Timeout: 10 * time.Second}
 
@@ -78,29 +80,29 @@ var (
 )
 
 type Server struct {
-	Name   	    					string
-	VersionString       	string
-	VersionNumber       	string
-	Build 								string
-	UptimeInSeconds 		 	float64
-	MessageLoopQueueSize	float64
+	Name                 string
+	VersionString        string
+	VersionNumber        string
+	Build                string
+	UptimeInSeconds      float64
+	MessageLoopQueueSize float64
 }
 
 type CountInState struct {
-	Idle 					float64
-	Registered 		float64
-	Registering 	float64
-	Unauthorized	float64
-	Error 				float64
+	Idle         float64
+	Registered   float64
+	Registering  float64
+	Unauthorized float64
+	Error        float64
 }
 
 type Instance struct {
-	Count      		float64
-	CountInState	CountInState
+	Count        float64
+	CountInState CountInState
 }
 
 type Measurement struct {
-	Server 	 Server
+	Server   Server
 	Instance Instance
 }
 
@@ -128,31 +130,60 @@ func getMeasurement(instance string, target interface{}) error {
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
-func collectSample() {
-	log.Println("Collecting sample...")
+func collectSample(instance string) {
+	log.Printf("Collecting sample for instance %s...", instance)
 	sipisMeasurement := new(Measurement)
-	getMeasurement(*instance, sipisMeasurement)
+	err := getMeasurement(instance, sipisMeasurement)
+	if err != nil {
+		log.Printf("Error collecting sample for instance %s: %v", instance, err)
+		return
+	}
 
-	instanceCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.Count)
-	instanceIdleCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.CountInState.Idle)
-	instanceRegisteredCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.CountInState.Registered)
-	instanceRegisteringCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.CountInState.Registering)
-	instanceUnauthorizedCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.CountInState.Unauthorized)
-	instanceErrorCountMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Instance.CountInState.Error)
-	serverUptimeInSecondsMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Server.UptimeInSeconds)
-	serverMessageLoopQueueSizeMeasurement.With(prometheus.Labels{"instance": *instance}).Set(sipisMeasurement.Server.MessageLoopQueueSize)
+	instanceCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.Count)
+	instanceIdleCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.CountInState.Idle)
+	instanceRegisteredCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.CountInState.Registered)
+	instanceRegisteringCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.CountInState.Registering)
+	instanceUnauthorizedCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.CountInState.Unauthorized)
+	instanceErrorCountMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Instance.CountInState.Error)
+	serverUptimeInSecondsMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Server.UptimeInSeconds)
+	serverMessageLoopQueueSizeMeasurement.With(prometheus.Labels{"instance": instance}).Set(sipisMeasurement.Server.MessageLoopQueueSize)
+}
+
+func collectSamples() {
+	for _, instance := range instances {
+		collectSample(instance)
+	}
 }
 
 func main() {
-	envy.Parse("SIPIS")
+	flag.Var(&instances, "instance", "Instance URL (can be specified multiple times)")
 	flag.Parse()
-	http.Handle("/metrics", prometheus.Handler())
 
-	collectSample()
+	// Parse instances from environment variable
+	if envInstances := os.Getenv("SIPIS_INSTANCES"); envInstances != "" {
+		for _, instance := range strings.Split(envInstances, ",") {
+			instances = append(instances, strings.TrimSpace(instance))
+		}
+	}
+
+	http.Handle("/metrics", promhttp.Handler())
+
+	collectSamples()
 	c := cron.New()
-	c.AddFunc(fmt.Sprintf("@every %s", *every), collectSample)
+	c.AddFunc(fmt.Sprintf("@every %s", *every), collectSamples)
 	c.Start()
 
 	log.Printf("Listening on %s!", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
+}
+
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	return fmt.Sprintf("%v", *m)
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
 }
